@@ -1,55 +1,66 @@
-// index.js (Vercelデプロイ用 Expressサーバー)
+// index.js (Vercelデプロイ用 Expressサーバー - ytdl-core版)
 
 const express = require('express');
-const { exec } = require('child_process');
+const ytdl = require('ytdl-core');
 
 const app = express();
 
-// ボディパーサーを設定 (JSON形式のリクエストを受け取るため)
+// ボディパーサーを設定
 app.use(express.json());
 
 // --- ルート定義 ---
 
 // ホームルート
 app.get('/', (req, res) => {
-    res.send('Welcome to the yt-dlp Streaming URL Extractor API. Use POST /api/stream_url to get a URL.');
+    res.send('Welcome to the ytdl-core Streaming URL Extractor API. Use POST /api/stream_url.');
 });
 
 // APIエンドポイント: ストリーミングURLを抽出して返す
-// 実行には、環境にyt-dlpバイナリがインストールされている必要があります。
-app.post('/api/stream_url', (req, res) => {
+app.post('/api/stream_url', async (req, res) => {
     const videoUrl = req.body.url;
 
     if (!videoUrl) {
         return res.status(400).json({ error: 'Video URL is required in the request body.' });
     }
 
-    // yt-dlpコマンドの構築
-    // -f best: 動画と音声が結合されたストリームの中で最高品質のものを選択
-    // --get-url: ダウンロードせずにURLのみを出力する
-    const command = `yt-dlp --get-url -f best "${videoUrl}"`;
+    // URLが有効なYouTube形式かチェック
+    if (!ytdl.validateURL(videoUrl)) {
+        return res.status(400).json({ error: 'Invalid YouTube URL provided.' });
+    }
 
-    // 外部コマンドを実行 (タイムアウト15秒を設定)
-    exec(command, { timeout: 15000 }, (error, stdout, stderr) => {
-        if (error) {
-            console.error(`yt-dlp exec error: ${error.message}`);
-            return res.status(500).json({ 
-                error: 'Failed to extract streaming URL.', 
-                details: error.message.substring(0, 200),
-                stderr: stderr.substring(0, 200)
-            });
+    try {
+        // 動画のメタデータ全体を取得
+        const info = await ytdl.getInfo(videoUrl);
+
+        // 動画と音声が結合されている（itagで音声が存在しない）フォーマットの中から、
+        // 最高品質（最も高い resolution または fps）のものを探します。
+        // ytdl-coreの仕様では、`quality: 'highest'` を指定すると最高品質の結合フォーマットが取得できます。
+        const format = ytdl.chooseFormat(info.formats, { 
+            quality: 'highest', // 'highest' は結合されたストリームの中での最高品質
+            filter: 'audioandvideo' // 動画と音声が結合されているもののみ
+        });
+
+        if (!format || !format.url) {
+            return res.status(404).json({ error: 'No combined high-quality streaming format found for this video.' });
         }
-        
-        // stdoutには、最高品質の単一のストリーミングURLが出力される
-        const streamingUrl = stdout.trim();
 
         // レスポンスをJSONで返す
         res.json({
-            message: 'Successfully extracted the best combined streaming URL.',
-            url: streamingUrl, 
+            message: 'Successfully extracted the best combined streaming URL using ytdl-core.',
+            url: format.url, 
+            quality: format.qualityLabel,
             note: 'This URL points to the best available single stream (video and audio combined).'
         });
-    });
+
+    } catch (error) {
+        console.error(`ytdl-core error: ${error.message}`);
+        
+        // エラー詳細をクライアントに返さないようにし、一般的なエラーメッセージにする
+        return res.status(500).json({ 
+            error: 'Failed to process video information.', 
+            details: 'Ensure the video is publicly accessible and not geo-blocked.'
+        });
+    }
 });
 
 module.exports = app;
