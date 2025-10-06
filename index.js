@@ -1,69 +1,62 @@
-// index.js (Vercelデプロイ用 Expressサーバー - ytdl-core版)
+// index.js (yt-dlpに戻し、cookies.txtを利用するバージョン)
 
 const express = require('express');
-const ytdl = require('ytdl-core');
+const { exec } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
-
-// ボディパーサーは不要になりましたが、ルートは残しておきます
-// app.use(express.json());
 
 // --- ルート定義 ---
 
 // ホームルート
 app.get('/', (req, res) => {
-    res.send('Welcome to the ytdl-core Streaming URL Extractor API. Use GET /api/videos/:videoid');
+    res.send('Welcome to the yt-dlp API server with cookies. Use GET /api/videos/:videoid');
 });
 
-// 新しいAPIエンドポイント: パスパラメータから動画IDを取得
-// /api/videos/ の後に続く部分を :videoid として取得します
-app.get('/api/videos/:videoid', async (req, res) => {
-    // パスパラメータから動画IDを取得
+// APIエンドポイント: パスパラメータから動画IDを取得し、yt-dlpを実行
+app.get('/api/videos/:videoid', (req, res) => {
     const videoId = req.params.videoid;
-    
-    // ytdl-coreは動画IDまたは完全なURLのいずれかを受け入れます
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    
+    // index.jsと同じディレクトリにある cookies.txt の絶対パス
+    const cookiesPath = path.join(__dirname, 'cookies.txt');
 
-    // 動画IDが有効な形式かチェック (例として、長さ11文字の単純なチェック)
     if (!videoId || videoId.length !== 11) {
          return res.status(400).json({ error: 'Invalid or missing YouTube Video ID in the URL path.' });
     }
-
-    try {
-        // 動画のメタデータ全体を取得
-        const info = await ytdl.getInfo(videoUrl);
-
-        // 動画と音声が結合されている（combined）フォーマットの中から、
-        // 最高品質のものを探します。
-        const format = ytdl.chooseFormat(info.formats, { 
-            quality: 'highest', // 'highest' は結合されたストリームの中での最高品質
-            filter: 'audioandvideo' // 動画と音声が結合されているもののみ
-        });
-
-        if (!format || !format.url) {
-            return res.status(404).json({ error: 'No combined high-quality streaming format found for this video.' });
-        }
-
-        // レスポンスをJSONで返す
-        res.json({
-            message: 'Successfully extracted the best combined streaming URL using ytdl-core.',
-            video_id: videoId,
-            url: format.url, 
-            quality: format.qualityLabel,
-            note: 'This URL points to the best available single stream (video and audio combined).'
-        });
-
-    } catch (error) {
-        console.error(`ytdl-core error for ID ${videoId}: ${error.message}`);
-        
-        // 404エラー（動画が見つからない、非公開など）の場合は、エラーを返します
-        const statusCode = error.message.includes('No video id found') ? 404 : 500;
-
-        return res.status(statusCode).json({ 
-            error: 'Failed to process video information.', 
-            details: 'Ensure the video is publicly accessible, not geo-blocked, and the ID is correct.'
-        });
+    
+    // cookies.txtの存在チェック (念のため)
+    if (!fs.existsSync(cookiesPath)) {
+        return res.status(500).json({ error: 'Configuration Error: cookies.txt file not found in the project root.' });
     }
+
+    // yt-dlpコマンドの構築
+    // -f best: 動画と音声が結合されたストリームの中で最高品質のものを選択
+    // --get-url: ダウンロードせずにURLのみを出力する
+    // --cookies: cookies.txtのパスを指定
+    const command = `yt-dlp --get-url -f best --cookies "${cookiesPath}" "${videoUrl}"`;
+
+    // 外部コマンドを実行 (タイムアウト15秒を設定)
+    // ⚠️ このコマンドは、デプロイ環境にyt-dlpバイナリが存在することを要求します。
+    exec(command, { timeout: 15000 }, (error, stdout, stderr) => {
+        if (error) {
+            console.error(`yt-dlp exec error for ID ${videoId}: ${error.message}`);
+            return res.status(500).json({ 
+                error: 'Failed to extract streaming URL. (Check yt-dlp installation)', 
+                details: error.message.substring(0, 200)
+            });
+        }
+        
+        const streamingUrl = stdout.trim();
+
+        res.json({
+            message: 'Successfully extracted the best combined streaming URL using yt-dlp (with cookies).',
+            video_id: videoId,
+            url: streamingUrl, 
+            note: 'URL extracted with session/preference data from cookies.'
+        });
+    });
 });
 
 module.exports = app;
