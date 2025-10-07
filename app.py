@@ -1,17 +1,20 @@
-# app.py
+# app.py (FINAL VERSION - Using /tmp for Writable Cookies File)
 
 import os
 from flask import Flask, jsonify, request
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
+import shutil # ファイルコピーのために追加
 
 app = Flask(__name__)
 
-# cookies.txt ファイルのパスを設定
-# Vercelでは、プロジェクトのルートが/var/task/になります。
-COOKIES_FILE = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+# 1. 読み取り専用のオリジナルファイルのパス
+ORIGINAL_COOKIES_FILE = os.path.join(os.path.dirname(__file__), 'cookies.txt')
 
-# --- ルート定義 ---
+# 2. 一時ファイルとして書き込み可能な /tmp ディレクトリに配置するパス
+# Vercelでは/tmpディレクトリのみが書き込み可能
+WRITABLE_COOKIES_FILE = '/tmp/cookies.txt'
+
 
 @app.route('/')
 def home():
@@ -21,46 +24,52 @@ def home():
 @app.route('/api/videos/<videoid>', methods=['GET'])
 def get_stream_url(videoid):
     """
-    パスパラメータから動画IDを取得し、yt-dlpとcookies.txtを使用してストリーミングURLを抽出
+    動画IDを取得し、cookies.txtのコピーを使用してyt-dlpを実行
     """
     video_url = f"https://www.youtube.com/watch?v={videoid}"
 
-    # cookies.txt の存在チェック
-    if not os.path.exists(COOKIES_FILE):
-        app.logger.error(f"Configuration Error: {COOKIES_FILE} not found.")
+    # --- クッキーファイルのコピー処理 ---
+    try:
+        if not os.path.exists(ORIGINAL_COOKIES_FILE):
+             raise FileNotFoundError(f"Original cookies file not found at {ORIGINAL_COOKIES_FILE}")
+
+        # 読み取り専用のファイルを/tmpにコピーし、yt-dlpが書き込めるようにする
+        shutil.copyfile(ORIGINAL_COOKIES_FILE, WRITABLE_COOKIES_FILE)
+        
+    except FileNotFoundError:
+        app.logger.error(f"Configuration Error: {ORIGINAL_COOKIES_FILE} not found.")
         return jsonify({
             "error": "Configuration Error: cookies.txt file not found.",
             "details": "Ensure cookies.txt is in the project root and pushed to GitHub."
         }), 500
+    except Exception as e:
+        app.logger.error(f"Error copying cookies file: {e}")
+        return jsonify({
+            "error": "File System Error: Could not prepare cookies file for writing.",
+            "details": str(e)
+        }), 500
+    # -----------------------------------
+
 
     # yt-dlp オプションの設定
     ydl_opts = {
-        # ログを非表示にする
         'quiet': True,
-        # ダウンロードはせず、情報を抽出する
         'simulate': True,
-        # URLのみを抽出する
         'geturl': True,
-        # cookies.txtのパスを指定
-        'cookiefile': COOKIES_FILE,
-        # 動画と音声が結合された最高品質のフォーマットを選択
+        # ⚠️ 書き込み可能な一時ファイルのパスを指定 ⚠️
+        'cookiefile': WRITABLE_COOKIES_FILE,
         'format': 'best', 
     }
 
     try:
-        # yt-dlpをライブラリとして実行し、情報を抽出
         with YoutubeDL(ydl_opts) as ydl:
-            # yt-dlpは、URL抽出時、情報を辞書として返さず、標準出力にURLを出力します。
-            # 'geturl': True が設定されているため、info_dictにはURLは含まれませんが、
-            # ydl.extract_info()が内部でストリーミングURLを取得します。
-            # しかし、APIで利用しやすくするため、標準的な抽出方法を使います。
+            # ydl.extract_info()を実行
             info = ydl.extract_info(video_url, download=False)
             
-            # 'url'キーが存在するか、あるいは最高品質の結合フォーマットを探す
-            if 'url' in info:
-                streaming_url = info['url']
-            else:
-                # 'best'フォーマットのURLを手動で探す
+            # 'best'フォーマットのURLを探すロジックはyt-dlpが処理します
+            streaming_url = info.get('url')
+
+            if not streaming_url:
                 best_format = ydl.get_format_with_quality(info['formats'], 'best')
                 if best_format and 'url' in best_format:
                     streaming_url = best_format['url']
@@ -75,7 +84,6 @@ def get_stream_url(videoid):
         })
 
     except DownloadError as e:
-        # 動画が見つからない、認証失敗、地域制限などのエラー
         app.logger.error(f"yt-dlp error for ID {videoid}: {e}")
         return jsonify({
             "error": "Failed to extract streaming URL.",
@@ -88,7 +96,3 @@ def get_stream_url(videoid):
             "error": "An unexpected server error occurred.",
             "details": str(e)
         }), 500
-
-# Vercelが動作させるためのエントリポイント (本番環境での実行は不要ですが、慣習として残します)
-if __name__ == '__main__':
-    app.run(debug=True)
